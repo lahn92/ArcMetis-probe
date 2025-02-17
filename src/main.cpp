@@ -23,6 +23,7 @@
 #include <avr/dtostrf.h>
 #include <PCA9540BD.h>  //Inkluderer bibliotek for PCA9540BD
 
+
 //EZO biblioteker
 #include <Ezo_i2c.h>
 #include <Ezo_i2c_util.h>
@@ -89,7 +90,7 @@ KellerLD Bar100;
 float P_ude;
 float P_ude_tjek;
 //Trykdifferens til styring af aktuator
-float Pdiff = 200;     //Tilladelige tryk differens i mbar.
+float Pdiff = 35;     //Tilladelige tryk differens i mbar.
 float adjP = 0;        //Variabel til justering af tryksensorer.
                        //AD konverter
 Adafruit_ADS1115 ads;  // Initialiserer ADS1115 objektet
@@ -133,12 +134,17 @@ float percentage;                //Variabel til at holde på den beregnede batte
 std::queue<float> last15Values;  // Kø til at gemme de sidste 10 værdier
 
 //Boolean til main-loop
-bool Main;
+bool Main = true;
 
 
 //Diverse I2C Adresser som ikke er defineret i deres biblioteker
 byte O2_addr = 0x6C;  //Standard ECO O2 sensor I2C address.
-byte EC_addr = 0x64;  //Standard ECO EC I2C addresse
+byte EC_addr = 0x7F;  //Standard ECO EC I2C addresse
+
+const byte ECrxPin = 2;
+const byte ECtxPin = 4;
+// Set up a new SoftwareSerial object for the EC sensor
+UART ECSerial (ECrxPin, ECtxPin, NC, NC);
 
 
 //Array til at holde på standby-værdierne
@@ -192,7 +198,19 @@ unsigned long TidNuAktu;                   //Nuværende tid til aktuator stop
 const unsigned long AktuStartTid = 10000;  //Tid som aktuatoren kører for at opnå være i top.
 bool AktuSetup = true;
 unsigned long NulstilStart;  //Bruges til at nulstille aktuatorens position
-bool movingBool = false;
+bool motorActiv = true; // bool to track if the motor is active 
+bool movingBool = true; // bool to track if motor is currently doing other jobs (resetting etc.) 
+bool movingDir = false; //bool to keep track of the current direction of the motor false == vacum 
+int movingTimeAccumulating = 0; //variable to keep track of the time the motor has moved in 1 direction.  
+const int timeToMoveFull = 5000; // the time it takes for the actuator to move full stroke
+const int settlingTime = 10000;      // Settling time before switching direction (in milliseconds)
+unsigned long movementTimeAccumulated = 0; // Total movement time in current direction
+unsigned long lastUpdateTime = 0; // Last time movement was updated
+unsigned long directionSwitchTime = 0; // Time when direction was switched
+bool isMoving = false; // Flag to check if the motor is currently running
+bool isSettling = false; // Flag to track if we are in the settling phase
+long aktuTidSidste = 0;
+const long aktuInterval = 100;
 
 
 // Multiplexer
@@ -224,6 +242,8 @@ void Data_fra_platform()  //Læse-funktion
       packetBuffer[len] = 0;               // Tilføjer en null-terminator til slutningen af dataene i packetBuffer
     }
     String input = String(packetBuffer);  // Konverterer packetBuffer til en streng
+    Serial.print("UDP packet is: ");
+    Serial.println(input);
     if (input == "ON") {                  // Tjekker, om den indgående streng er "ON", hvis den er starter main-loopet
       Main = true;
     }
@@ -237,7 +257,7 @@ void Data_fra_platform()  //Læse-funktion
       interval = tal_fra_platform.toFloat();
     }
     if (input == "Vandprove") {
-
+      Serial.println("conducting water sample");
       servo.write(180);                            // move the servo to 180 degrees
       while (millis() - SidsteTid < interval1) {}  // Venter på at servomotren er åben
 
@@ -388,35 +408,53 @@ float EZO_sensorer(byte addr) {
   }
 }
 float EC_float() {
+  ECSerial.println("R");  // Send the "read" command to the sensor
 
-  Wire.beginTransmission(0x64);  // call the circuit by its ID number.
-  Wire.write("R");               // transmit the command that was sent through the serial port.
-  Wire.endTransmission();        // end the I2C data transmission.
+  delay(600);  // Allow the sensor to process and respond
 
-  delay(570);  // wait the correct amount of time for the circuit to complete its instruction.
-
-  Wire.requestFrom(0x64, 32, 1);  // call the circuit and request 32 bytes.
-
-  int code = Wire.read();  // the first byte is the response code, we read this separately.
-
-  // Make sure to reset the ec_data buffer and the counter i
+  // Reset the buffer and counter
   memset(ec_data, 0, sizeof(ec_data));
   i = 0;
 
-  while (Wire.available()) {
-    in_char = Wire.read();        // receive a byte.
-    ec_data[i] = in_char;         // load this byte into our array.
-    i += 1;                       // increment the counter for the array element.
-    if (Wire.available() == 0) {  // if we see that we have been sent a null command.
-      i = 0;                      // reset the counter i to 0.
-      break;                      // exit the while loop.
+  unsigned long startTime = millis();  // Track start time for timeout
+  while (millis() - startTime < 1000) {  // 1-second timeout
+    if (ECSerial.available()) {
+      char in_char = ECSerial.read();  // Read a byte
+      if (i < sizeof(ec_data) - 1) {   // Ensure we don't overflow the buffer
+        ec_data[i++] = in_char;        // Store the byte and increment the counter
+      }
+      if (ECSerial.available() == 0) { // Exit when no more data is available
+        break;
+      }
     }
   }
 
-  float ec_fdata = atof(ec_data);
+  ec_data[i] = '\0';  // Null-terminate the string
 
-  return ec_fdata;
+  // Parse the response to extract the numeric portion
+  String response = String(ec_data);       // Convert to String for easier manipulation
+  int commaIndex = response.indexOf(',');  // Find the first comma
+  if (commaIndex != -1) {
+    response.setCharAt(commaIndex, '.');   // Replace comma with a period
+  }
+
+  int spaceIndex = response.indexOf(' ');  // Find the space before the status message
+  if (spaceIndex != -1) {
+    response = response.substring(0, spaceIndex);  // Keep only the numeric part
+  }
+
+  // Convert to float and return
+  float ec_fdata = response.toFloat();  // Convert to float
+  if (ec_fdata == 0.0 && response[0] != '0') {
+    // Handle invalid or unexpected response
+    Serial.println("Error: Invalid EC data");
+    return -1.0;  // Return a sentinel value indicating an error
+  }
+
+  return ec_fdata;  // Return the converted float
 }
+
+
 
 void batteriniveau() {
   // Beregn spændingsniveauet i procent
@@ -445,46 +483,76 @@ void batteriniveau() {
 }
 
 void PdiffTjek() {
+    //Serial.println("running pdifftjek");
 
+    if (movingBool == true || motorActiv == false || Perc_bat< 15) {
+        Serial.println("returning due to movingBool == true");
+        return;
+    }
 
-  if (movingBool == true) {
-    return;
-  }
+    TidligereP_inde = P_inde;
+    multiplexer.selectChannel(1);
+    Bar100.read();
+    P_ude = Bar100.pressure();
+    multiplexer.selectChannel(0);
+    Bar30.read();
+    P_inde = adjP + Bar30.pressure();
+    unsigned long currentTime = millis(); // Get the current time
 
-  if (abs(P_inde - TidligereP_inde) <= P_tolerance) {  //Hvis det indre tryk ikke justeres efter sidste gennemkørsel, kan det være en tegn på at aktuatoren er i bund/top
-    return;
-  }
+    // Accumulate movement time only when the motor is running
+    if (isMoving) {
+        movementTimeAccumulated += (currentTime - lastUpdateTime);
+    }
 
-  TidligereP_inde = P_inde;
+    lastUpdateTime = currentTime; // Update time tracking
 
-  if (P_ude - P_inde > Pdiff && P_inde <= 20000) {
-    while (true) {
-      analogWrite(motorPWMOP, 150);
-      Bar100.read();
-      Bar30.read();
-      P_ude_tjek = Bar30.pressure();
-      P_inde_tjek = Bar30.pressure() + adjP;
-      if (P_ude_tjek - P_inde_tjek <= 0) {
+    // Handle Settling Time
+    if (isSettling) {
+        if (currentTime - directionSwitchTime >= settlingTime) {
+            Serial.println("Settling time over, resuming movement.");
+            isSettling = false; // Settling period is over
+        } else {
+            Serial.println("Waiting for settling time...");
+            return; // Exit function to keep the motor stopped
+        }
+    }
+
+    // Check if total movement time exceeds the limit
+    if (movementTimeAccumulated >= timeToMoveFull) {
+        Serial.println("Switching direction due to accumulated time limit");
+
+        movingDir = !movingDir;  // Reverse direction
+        movementTimeAccumulated = 0; // Reset accumulated time
+
+        // Start settling period
+        isSettling = true;
+        directionSwitchTime = currentTime;
+
+        // Stop the actuator during settling time
         analogWrite(motorPWMOP, 0);
-        break;
-      }
-    }
-  }
-  if (P_ude - P_inde < Pdiff && P_inde <= 20000) {
-    while (true) {
-      analogWrite(motorPWMNED, 150);
-      Bar100.read();
-      Bar30.read();
-      P_ude_tjek = Bar30.pressure();
-      P_inde_tjek = Bar30.pressure() + adjP;
-      if (P_ude_tjek - P_inde_tjek >= 0) {
         analogWrite(motorPWMNED, 0);
-        break;
-      }
+        isMoving = false;
+
+        return; // Exit function to enforce settling period
     }
-  } else {
-    return;
-  }
+
+    // Control actuator movement
+    if (movingDir == false && (P_ude - P_inde) <= Pdiff && P_inde <= 20000) {
+        analogWrite(motorPWMNED, 150);
+        analogWrite(motorPWMOP, 0);
+        isMoving = true;
+    }
+    else if (movingDir == true && (P_ude - P_inde) >= -1*Pdiff && P_inde <= 20000) {
+        analogWrite(motorPWMOP, 150);
+        analogWrite(motorPWMNED, 0);
+        isMoving = true;
+    }
+    else {
+        // Stop the actuator if the pressure difference is within range
+        analogWrite(motorPWMOP, 0);
+        analogWrite(motorPWMNED, 0);
+        isMoving = false; // Stop tracking time when motor is not moving
+    }
 }
 
 void Send_til_platform(char* char_data) {
@@ -514,20 +582,19 @@ void NulstilAktu() {
   }
 }
 
-void SkrivTilSD(float data) {
-  File dataFile = SD.open(fileName, FILE_WRITE);  // Åbner det oprettede dokument for skrivning
+void SkrivTilSD(const char* dataLine) {
+  File dataFile = SD.open(fileName, FILE_WRITE);  // Open the file for writing
   if (dataFile) {
-    String dataString = String(data);
-    dataFile.print(dataString);  // Printer kolonne i tekstdokumentet
-    dataFile.print(",");
-    dataFile.flush();  // Sikrer at data bliver skrevet til SD-kortet
-    dataFile.close();  // Lukker filen efter skrivning
+    dataFile.println(dataLine);  // Write the string (with a newline at the end)
+    dataFile.flush();            // Ensure data is written to the SD card
+    dataFile.close();            // Close the file
   } else {
-    return;
+    // Handle file open error
+    Serial.println("Error opening file!");
   }
-  // Forsøg på at frigive SD-kortet efter operationerne
-  SD.end();  // Frigør SD-kortet
+  SD.end();  // Release SD card resources
 }
+
 
 void delay500ms() {                      //Sikre mere stabilt program. Ikke nødvendigvis 500 ms.
   unsigned long startMillis = millis();  // Record the start time
@@ -538,297 +605,314 @@ void delay500ms() {                      //Sikre mere stabilt program. Ikke nød
 
 void setup() {
 
-
-  //Generelt
+  // Wait for serial connection
   Serial.begin(9600);
+  //while (!Serial) {}
+    // Wait for Serial connection to establish
+  
+  Serial.println("Serial connection established.");
+
+  // Set the baud rate for the SoftwareSerial object
+  ECSerial.begin(9600);
+
+  // Delay to ensure stability
   delay(2000);
-  Serial1.begin(57600);  //Til UART kommunikation til MIPEX
+  Serial1.begin(57600);  // For UART communication to MIPEX
+  Serial.println("Serial1 initialized at 57600 baud.");
 
-  Wire.begin();  //Begynder I2C kommunikation
-  //Ethernet
-  Ethernet.init(CS);                         //Definerer hvilken pin chip select til ethernet board er tilsluttet
-  Ethernet.begin(mac, ip, gateway, subnet);  //Opretter et netværk for arduinoen med de definerede netværksoplysninger
-  Udp.begin(localPort);                      //Starter UDP kommunikation på den definerede port
+  // Start I2C communication
+  Wire.begin();
+  Wire.setClock(100000);
+  Serial.println("I2C communication started at 400 kHz.");
 
-  //Start af kommunikation til diverse sensorer:
+  // Ethernet initialization
+  Ethernet.init(CS);
+  Serial.println("Ethernet initialized with Chip Select pin.");
+  Ethernet.begin(mac, ip, gateway, subnet);
+  Serial.println("Ethernet network configured.");
+  Udp.begin(localPort);
+  Serial.println("UDP communication started on port " + String(localPort) + ".");
 
-  //Bar30
-  multiplexer.selectChannel(0);  // for selecting SD1 and SC1
+  // Start communication with sensors
+
+  // Bar30 sensor
+  multiplexer.selectChannel(0);
   Bar30.init();
-  Bar30.setModel(MS5837::MS5837_30BA);  //Sætter modellen til bar30
+  Bar30.setModel(MS5837::MS5837_30BA);
+  Serial.println("Bar30 sensor initialized on multiplexer channel 0.");
 
-  //SCD30
+  // SCD30 sensor
   SCD30.begin();
+  Serial.println("SCD30 sensor initialized.");
 
-  //Tsys
-  TSYS.init();
-
-  //A/D konverter
-  ads.begin();
-  ads.setGain(GAIN_TWOTHIRDS);  // 2/3x gain +/- 6.144V  1 bit = 3mV https://learn.adafruit.com/adafruit-4-channel-adc-breakouts/arduino-code
-
-  //HTU-21 fugtsensor
+  // HTU-21 humidity sensor
   htu.begin();
+  Serial.println("HTU-21 sensor initialized.");
 
-  // //SD-kort
-  SD.begin(chipSelect);                 // Initialiserer SD-kortet på den specificerede CS (Chip Select) pin
-  fileNum = 1;                          // Startværdi til datafilX.
-  char tempFileName[13] = "Data1.txt";  // Opretter en midlertidig filnavn streng
-  // Hvis Data1.txt allerede findes på SD kortet vil den øge det sidste nummer indtil den finder et ledigt navn.
-  while (SD.exists(tempFileName)) {                // Tjekker om filen allerede eksisterer på SD-kortet
-    fileNum++;                                     // Hvis filen eksisterer, øges filnummeret
-    sprintf(tempFileName, "DATA%d.txt", fileNum);  // Genererer et nyt filnavn med det opdaterede filnummer
+  // Tsys and Bar100 sensors
+  multiplexer.selectChannel(1);
+  TSYS.init();
+  Bar100.init();
+  Serial.println("TSYS and Bar100 sensors initialized on multiplexer channel 1.");
+
+  // A/D converter
+  ads.begin();
+  ads.setGain(GAIN_TWOTHIRDS);
+  Serial.println("ADS A/D converter initialized with gain 2/3x.");
+
+  // SD card initialization
+  if (SD.begin(chipSelect)) {
+    fileNum = 1;
+    char tempFileName[13] = "Data1.txt";
+    while (SD.exists(tempFileName)) {
+      fileNum++;
+      sprintf(tempFileName, "DATA%d.txt", fileNum);
+    }
+    strcpy(fileName, tempFileName);
+    File dataFile = SD.open(fileName, FILE_WRITE);
+    if (dataFile) {
+      dataFile.println("Tid [s],P_out [mbar],P_in [mbar],RH [%],T_SCD [C],T_HTU21 [C],T_out [C],CO2 [ppm],O2 [ppt],CH4 [V],MIPEX ,EC [muS/cm], Batteriniveau [%]");
+      dataFile.flush();
+      dataFile.close();
+      Serial.println("SD card initialized. File " + String(fileName) + " created.");
+    } else {
+      Serial.println("Error: Failed to open file on SD card.");
+    }
+    SD.end();
+  } else {
+    Serial.println("Error: SD card initialization failed.");
   }
-  strcpy(fileName, tempFileName);                                                                                                                                // Kopierer det endelige filnavn fra den midlertidige filnavn streng
-  File dataFile = SD.open(fileName, FILE_WRITE);                                                                                                                 // Åbner det oprettede dokument for skrivning
-  dataFile.println("Tid [s],P_out [mbar],P_in [mbar],RH [%],T_SCD [C],T_HTU21 [C],T_out [C],CO2 [ppm],O2 [ppt],CH4 [V],MIPEX ,EC [muS/cm], Batteriniveau [%]");  // Printer kolonne overskrift i tekstdoumentet
 
-  dataFile.flush();  // Sikrer at data bliver skrevet til SD-kortet
-  dataFile.close();  // Lukker filen efter skrivning
-  SD.end();          // Frigør SD-kortet
-  startTid = millis();
+  // Leak sensor
+  pinMode(leakPin, INPUT);
+  Serial.println("Leak sensor pin configured as input.");
 
-  //Indtil den modtager et start signal fra platformen skal den kun fortage dybdemålinger samt logge tiden
-  Main = false;
-
-  //Til lækage sensorer
-  pinMode(leakPin, INPUT);  // Set pin as input
-
-
-
-  // //Til servomotor
-
+  // Servo motor setup
   servo.attach(servoPin, MIN_PULSE_WIDTH, MAX_PULSE_WIDTH);
-  servo.write(0);                                             // Sørger for at ventilen er lukket når programmet starter
-  while (millis() - previousMillisSetup < interval1Setup) {}  // Sikre at sermotoren har tid nok til at dreje ventil i lukkeposition
+  servo.write(0);
+  Serial.println("Servo motor initialized and set to closed position.");
+  while (millis() - previousMillisSetup < interval1Setup) {}
 
   previousMillisSetup = millis();
-  servo.write(6);                                             // Drejer motoren 5 grader for at undgå unødvendige holdemoment og derved strømforbrug
-  while (millis() - previousMillisSetup < interval2Setup) {}  // Sikre at sermotoren har tid nok til at dreje ventil i lukkeposition
+  servo.write(6);
+  Serial.println("Servo motor moved to 6 degrees to minimize holding torque.");
+  while (millis() - previousMillisSetup < interval2Setup) {}
 
-  //Aktuator
+  // Actuator setup
   pinMode(motorPWMOP, OUTPUT);
   pinMode(motorPWMNED, OUTPUT);
+  analogWrite(motorPWMOP, 150);
+  Serial.println("Actuator motor initialized and set to move up.");
 
-  analogWrite(motorPWMOP, 255);  //Morten kører op
+  delay(5000);
+
+  movingBool = false;
+  AktuSetup = false;
+
+  multiplexer.selectChannel(1);
+  Bar100.read();
+  P_ude = Bar100.pressure();
+  multiplexer.selectChannel(0);
+  Bar30.read();
+  P_inde = Bar30.pressure();
+  adjP = P_ude - P_inde;
+      
 
 
-  //Leak sensor
-  pinMode(leakPin, INPUT);
-
-  //Bar100
-  multiplexer.selectChannel(1);  // for selecting SD0 and SC0
-  Bar100.init();
+  // Initialization complete
+  Serial.println("Setup complete. System is ready.");
 }
 
 
 
+
 void loop() {
+  Serial.println("Starting loop");
+
+  for (int i = 0; i < 13; i++) {
+    mainData[i] = -1;  // Initialize all values in main data to -1
+  }
+
   TidNuAktu = millis();
   if ((AktuSetup == true && TidNuAktu - startTid >= AktuStartTid) || (P_inde >= 20000)) {
-    analogWrite(motorPWMOP, 0);  // Stop motoren
+    Serial.println("Stopping motor due to condition");
+    analogWrite(motorPWMOP, 0);  // Stop motor
+    movingBool = false;
     AktuSetup = false;
   }
+
   while (Main == false) {
-    leak = 0;                                //Nulstille lækageværdien i tilfælde af fejl.
-    if (millis() - tidSidste >= interval) {  //Da delay() funktionen giver en unødvendigt delay i datamodtagelse fra platform køres loopet kun når x tid er gået
-      tidSidste = millis();                  // Opdaterer variabel tidSidste til nuværende tid
+    //Serial.println("Entering standby loop");
 
-      Stopur();  //Tiden noteres
-      SkrivTilSD(tidGaaet);
+    leak = 0;  // Reset leak value
+    if (millis() - tidSidste >= interval) {
+      tidSidste = millis();
+      Serial.println("Performing periodic tasks in standby loop");
+      Stopur();
 
+      mainData[0] = tidGaaet;
+      standby_data[0] = tidGaaet;
 
-      standby_data[0] = tidGaaet;  //Opdater standby arrayet med den nye tid
-      //Der fortages en måling af det udvendige tryk
-      multiplexer.selectChannel(1);  // for selecting SD0 and SC0
+      multiplexer.selectChannel(1);  // Selecting SD0 and SC0
       Bar100.read();
-      P_ude = Bar100.pressure();  //Opdater standby arrayet med den nye trykmåling
+      P_ude = Bar100.pressure();
       standby_data[1] = P_ude;
-      SkrivTilSD(P_ude);
+      mainData[1] = P_ude;
 
-      //Læser batteriniveau
+      Serial.print("External pressure: ");
+      Serial.println(P_ude);
+
       batteriniveau();
       standby_data[2] = Perc_bat;
-      SkrivTilSD(Perc_bat);
+      mainData[12] = Perc_bat;
 
-      // I din kode kan du nu kalde denne funktion med dit array og dets størrelse:
+      Serial.print("Battery percentage: ");
+      Serial.println(Perc_bat);
+
       standby_str = sizeof(standby_data) / sizeof(standby_data[0]);
-
       float_til_char(standby_data, standby_str);
 
-      // Send bufferen via UDP
       Send_til_platform(buffer);
 
-      PdiffTjek();
+      mainStr = sizeof(mainData) / sizeof(mainData[0]);
+      float_til_char(mainData, mainStr);
 
-    }  //Lukker tids-if-statement
+      SkrivTilSD(buffer);
+     
+    }
 
-    Data_fra_platform();  //Tjekker om der er data fra platformen
-    //Input fra lækagesensorer
+    Data_fra_platform();
+
     TidNuLeak = millis();
-    leak = digitalRead(leakPin);                                   // Read the Leak Sensor Pin
-    if (leak == 1 && TidNuLeak - TidSidsteLeak >= IntervalLeak) {  //
+    leak = digitalRead(leakPin);
+    if (leak == 1 && TidNuLeak - TidSidsteLeak >= IntervalLeak) {
+      Serial.println("Leak detected");
       Udp.beginPacket(remoteIp, remotePort);
       Udp.write("Leak");
       Udp.endPacket();
       TidSidsteLeak = TidNuLeak;
     }
-
-  }  //Lukker Standby-loop
+    if (millis() - aktuTidSidste >= aktuInterval) {
+    PdiffTjek();
+    aktuTidSidste = millis();
+    }
+  }
 
   while (Main == true) {
-    TidNuAktu = millis();
-    if (AktuSetup == true && TidNuAktu - startTid >= AktuStartTid) {
-      analogWrite(motorPWMOP, 0);  // Stop motoren
-      AktuSetup == false;
-    }
-    leak = 0;                                //Nulstiller lækage informationen i tilfælde af fejl.
-    if (millis() - tidSidste >= interval) {  //Da delay() funktionen giver en unødvendigt delay i datamodtagelse fra platform udnødvendigt forsinket køres loopet kun når x tid er gået
-      tidSidste = millis();                  // Opdaterer variabel tidSidste til nuværende tid
-      multiplexer.selectChannel(0);
-      delay500ms();
+    //Serial.println("Entering main loop");
 
-      //Drifttiden logges
+    leak = 0;  // Reset leak value
+    if (millis() - tidSidste >= interval) {
+      tidSidste = millis();
+      Serial.println("Performing periodic tasks in main loop");
+
       Stopur();
-      SkrivTilSD(tidGaaet);
 
+      multiplexer.selectChannel(0);
 
-      //Måling af det udvendige tryk
-      multiplexer.selectChannel(1);  // for selecting SD0 and SC0
-      Bar100.read();
-      P_ude = Bar100.pressure();  //Opdater arrayet med den nye trykmåling
-      delay500ms();
-      multiplexer.selectChannel(0);  // for selecting SD1 and SC1 (Øvre)
-      delay500ms();
-      SkrivTilSD(P_ude);
-
-      //Måling af det indvendige tryk
 
       Bar30.read();
       P_inde = Bar30.pressure();
       P_inde += adjP;
-      delay500ms();
-      SkrivTilSD(P_inde);
+      Serial.print("Internal pressure: ");
+      Serial.println(P_inde);
 
-
-
-      //Temperatur samt CO2 måling fra SCD30
       SCD30.read();
       CO2 = SCD30.CO2;
       SCD30_temp = SCD30.temperature;
+      Serial.print("SCD30 temp: ");
+      Serial.println(SCD30_temp);
+      Serial.print("SCD30 co2: ");
+      Serial.println(CO2);
 
-      delay500ms();
-      SkrivTilSD(CO2);
-      SkrivTilSD(SCD30_temp);
+      RH = htu.readHumidity();
+      htu_temp = htu.readTemperature();
+      Serial.print("HTU temp: ");
+      Serial.println(htu_temp);
 
 
-      //Ude temperatur fra TSYS01
+      multiplexer.selectChannel(1);
+      Bar100.read();
+      P_ude = Bar100.pressure();
+      Serial.print("external pressure: ");
+      Serial.println(P_ude);
+
       TSYS.read();
       T_ude = TSYS.temperature();
-
-      // Check for NaN or extreme values
       if (isnan(T_ude) || T_ude < 0 || T_ude > 100) {
-        T_ude = 99;  // Set default value for humidity
+        T_ude = 99;
       }
-      delay500ms();
-      SkrivTilSD(T_ude);
+      Serial.print("external temp: ");
+      Serial.println(T_ude);
 
-
-
-      //O2 måling
       O2 = EZO_sensorer(O2_addr);
-      delay500ms();
-      SkrivTilSD(O2);
+      Serial.print("O2 level: ");
+      Serial.println(O2);
 
-      // //EC måling
       EC = EC_float();
-      delay500ms();
-      SkrivTilSD(EC);
+      Serial.print("EC level: ");
+      Serial.println(EC);
 
 
-      //Temperatur samt relativfugtigheds måling fra 1899 - HTU sensor
-      RH = htu.readHumidity();
-      SkrivTilSD(RH);
+      adc3 = ads.readADC_SingleEnded(1);
+      CH4 = adc3 * 0.1875;
+      Serial.print("CH4 level: ");
+      Serial.println(CH4);
 
-      htu_temp = htu.readTemperature();
-      SkrivTilSD(htu_temp);
-
-
-      //ADC til CH4 sensor
-      adc3 = ads.readADC_SingleEnded(1);  // Læser ADC-kortets AIN3-indgang
-      CH4 = adc3 * 0.1875;                //Regner de målte værdier om til millivolt.
-      delay500ms();
-      SkrivTilSD(CH4);
-
-
-      //KODE TIL MIPEXSENSOR
       Serial1.write("DATA");
       Serial1.write('\r');
       tidLyt = millis();
 
-
-      while ((millis() - tidLyt) < 100) {  // Der lyttes efter respons i 0,1 sekunder.
+      while ((millis() - tidLyt) < 100) {
         if (Serial1.available()) {
           inByte = Serial1.read();
 
           if (inByte != '\r') {
-            dataArray[arrayIndex] = inByte;  // Gemmer dataene i arrayet
-            arrayIndex++;                    // Øger arrayets indeks
+            dataArray[arrayIndex] = inByte;
+            arrayIndex++;
           } else {
-            dataArray[arrayIndex] = '\0';  // Null-terminer arrayet
-            arrayIndex = 0;                // Nulstiller array indeks
+            dataArray[arrayIndex] = '\0';
+            arrayIndex = 0;
           }
 
-          if (arrayIndex == 5) {  // Hvis der er foretaget 5 gennemkørsler
-            dataArray[5] = '\0';  // Sørg for, at arrayet er korrekt afsluttet
+          if (arrayIndex == 5) {
+            dataArray[5] = '\0';
 
-            String MIPEX_S = String((char*)dataArray);  // Konverter til String
+            String MIPEX_S = String((char *)dataArray);
             int MIPEX_int = MIPEX_S.toInt();
 
-            MIPEX = (float)MIPEX_int;  // Konverter til float
-            SkrivTilSD(MIPEX);
+            MIPEX = (float)MIPEX_int;
           }
         }
       }
-      delay500ms();
 
-      //Batteriniveauet opdateres
       batteriniveau();
-      delay500ms();
-      SkrivTilSD(Perc_bat);
+      Serial.print("bat:");
+      Serial.println(Perc_bat);
 
+      float mainData[13] = {tidGaaet, P_ude, P_inde, RH, SCD30_temp, htu_temp, T_ude, CO2, O2, CH4, MIPEX, EC, Perc_bat};
 
-
-      //Array med main data
-      float mainData[13] = { tidGaaet, P_ude, P_inde, RH, SCD30_temp, htu_temp, T_ude, CO2, O2, CH4, MIPEX, EC, Perc_bat };
-
-      //Størrelse af main data array
       mainStr = sizeof(mainData) / sizeof(mainData[0]);
+      float_til_char(mainData, mainStr);
+      Send_til_platform(buffer);
+      SkrivTilSD(buffer);
+      multiplexer.selectChannel(1);
+    }
 
-      //Float main data array konverteres til char
-      float_til_char(mainData, mainStr);  //Konventerer float værdierne til char
-      delay500ms();
-      //Char array med main data sendes til platform
-      Send_til_platform(buffer);  //Sender char bufferen via UDP
-      //Ny linje til tekstdokument
-      File dataFile = SD.open(fileName, FILE_WRITE);  // Åbner det oprettede dokument for skrivning
-      dataFile.println("");                           // Linjeskift
-      dataFile.close();                               // Lukker filen efter skrivning
-      PdiffTjek();                                    //Tjekker om aktuatoren skal justere ift. det ønsket tryk differens
-      multiplexer.selectChannel(1);                   // for selecting SD0 and SC0
-      delay500ms();
-    }  //Lukker tids IF-loop
+    Data_fra_platform();
 
-    Data_fra_platform();  //Tjekker om der er data fra platformen
-
-    //Input fra lækagesensorer
     TidNuLeak = millis();
-    leak = digitalRead(leakPin);                                   // Read the Leak Sensor Pin
-    if (leak == 1 && TidNuLeak - TidSidsteLeak >= IntervalLeak) {  //
+    leak = digitalRead(leakPin);
+    if (leak == 1 && TidNuLeak - TidSidsteLeak >= IntervalLeak) {
+      Serial.println("Leak detected in main loop");
       Udp.beginPacket(remoteIp, remotePort);
       Udp.write("Leak");
       Udp.endPacket();
       TidSidsteLeak = TidNuLeak;
-    }  //Lukker LEAK loop
-  }    //Lukker main loop
-}  //Lukker void-loop
+    }
+    if (millis() - aktuTidSidste >= aktuInterval) {
+    PdiffTjek();
+    aktuTidSidste = millis();
+    }
+  }
+}
