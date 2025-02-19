@@ -1,7 +1,7 @@
 
 //Samling af biblioteker, der inkluderes i Arduino-sketchen for at give funktionalitet til forskellige de forskellige hardwarekomponenter og kommunikationsprotokoller:
 
-#include <Adafruit_ADS1X15.h>  //Inkluderer bibliotek for A/D konverter fra Adafruit
+//#include <Adafruit_ADS1X15.h>  //Inkluderer bibliotek for A/D konverter fra Adafruit
 #include <Servo.h>             //Inkluderer bibliotek for servomotor til vandprøve
 #include <Wire.h>              //Inkluderer bibliotek for I2C kommunikation
 #include <SD.h>                //Inkluderer bibliotek for SD-kort
@@ -23,6 +23,7 @@
 #include <avr/dtostrf.h>
 #include <PCA9540BD.h>  //Inkluderer bibliotek for PCA9540BD
 #include <malloc.h>
+#include <ADS1X15.h>
 
 
 //EZO biblioteker
@@ -67,8 +68,9 @@ int fileNum;
 String dataString = "";
 
 // Laver en buffer til konventering fra float til char, som er nødvendig for at kunne skrive til SD-kortet.
-const int buffer_size = 8;  //Buffer størrelsen er 8 - kan ske at den skal ændres.
+const int buffer_size = 256;  // Adjust based on your needs
 char buffer[buffer_size] = "";
+
 
 //SCD30
 Adafruit_SCD30 SCD30;
@@ -94,7 +96,9 @@ float P_ude_tjek;
 float Pdiff = 35;     //Tilladelige tryk differens i mbar.
 float adjP = 0;        //Variabel til justering af tryksensorer.
                        //AD konverter
-Adafruit_ADS1115 ads;  // Initialiserer ADS1115 objektet
+
+ADS1115 ADS(0x48);
+//Adafruit_ADS1115 ads;  // Initialiserer ADS1115 objektet
 float CH4;             //Variabel til at holde på den beregne CH4 spænding
 int16_t adc3;          // CH4 sensoren er forbundet til ADC analog port 3
 
@@ -366,18 +370,27 @@ void Stopur() {
   tidGaaet = ((nuTid - startTid) / 1000);  //Tid [s] gået siden funktionen sidst blev kaldt.
 }
 
-void float_til_char(float* data, int size) {  //Funktion til at konvetere float værdier til string og tilføje det til en samlet string array (buffer)
-  char temp[100];                             //Buffer til string
-  memset(buffer, 0, sizeof(buffer));          //Nulstiller buffer
-  memset(buffer, 0, sizeof(temp));            //Nulstiller temp
+void float_til_char(float* data, int size) {
+  char temp[20];  // Temporary buffer for each float
+
+  memset(buffer, 0, sizeof(buffer));  // Reset buffer safely
+
   for (int i = 0; i < size; i++) {
-    dtostrf(data[i], 6, 2, temp);
-    strcat(buffer, temp);  // Tilføjer den nye string til buffer
-    if (i < size - 1) {    // Tilføj komma-separeret værdi mellem hver værdi undtagen den sidste
-      strcat(buffer, ",");
+    snprintf(temp, sizeof(temp), "%.2f", data[i]);  // Convert float safely
+
+    // Ensure we don't exceed buffer size
+    if (strlen(buffer) + strlen(temp) + 1 < buffer_size) {
+      strcat(buffer, temp);  
+      if (i < size - 1) {
+        strcat(buffer, ",");  
+      }
+    } else {
+      // Handle overflow case
+      break;
     }
   }
 }
+
 
 
 float EZO_sensorer(byte addr) {
@@ -385,7 +398,6 @@ float EZO_sensorer(byte addr) {
   if (addr == O2_addr) {
     dataStr = 20;
     time_ = 600;
-    char O2_data[20];
     tempString = String(htu_temp, 0);
     Wire.write(("RT," + tempString).c_str());  // Sender en "RT,den indvendige temperatur" kommando til sensoren for at anmode om en enkelt aflæsning.
     Wire.endTransmission();                    // Afslutter I2C-dataoverførslen.
@@ -668,8 +680,17 @@ void setup() {
   Serial.println(F("TSYS and Bar100 sensors initialized on multiplexer channel 1."));
 
   // A/D converter
-  ads.begin();
-  ads.setGain(GAIN_TWOTHIRDS);
+  //ads.begin();
+  //ads.setGain(GAIN_TWOTHIRDS);
+  if (!ADS.begin()) 
+  {
+    //  invalid address ADS1115 or 0x48 not found
+  }
+  if (!ADS.isConnected()) 
+  {
+    //  address 0x48 not found
+  }
+  ADS.setGain(0);
   Serial.println(F("ADS A/D converter initialized with gain 2/3x."));
 
   // SD card initialization
@@ -757,7 +778,7 @@ void loop()
 
   while (Main == false)
   {
-    
+
     // Serial.println("Entering standby loop");
     delay(1); // Prevent watchdog timeout
     leak = 0; // Reset leak value
@@ -875,11 +896,20 @@ void loop()
 
       printMemoryStats();
 
-
-      adc3 = ads.readADC_SingleEnded(1);
-      CH4 = adc3 * 0.1875;
-      Serial.print("CH4 level: ");
-      Serial.println(CH4);
+      adc3 = ADS.readADC(1);
+      // adc3 = ads.readADC_SingleEnded(1);
+      if (ADS.getError() == ADS1X15_OK)
+      {
+        CH4 = adc3 * 0.1875;
+        Serial.print("CH4 level: ");
+        Serial.println(CH4);
+      }
+      //  Use value
+      else
+      {
+        Serial.println(F("ADC Error"));
+      }
+      //  handle error
 
       Serial1.write("DATA");
       Serial1.write('\r'); // Request data from Serial1
