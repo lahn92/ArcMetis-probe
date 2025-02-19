@@ -15,23 +15,24 @@
 #include <Adafruit_HTU21DF.h>  //Inkluderer bibliotek for HTU21
 #include <string>              // Bibliotek for konventering fra float til string
 #include <queue>               //Kø bibliotek
-#include <Ezo_i2c.h>
-#include <Ezo_i2c_util.h>
+//#include <Ezo_i2c.h>
+//#include <Ezo_i2c_util.h>
 //Biblioteker for konventering fra Char til float og omvendt
 #include <stdlib.h>
 #include <stdio.h>
 #include <avr/dtostrf.h>
 #include <PCA9540BD.h>  //Inkluderer bibliotek for PCA9540BD
+#include <malloc.h>
 
 
 //EZO biblioteker
-#include <Ezo_i2c.h>
-#include <Ezo_i2c_util.h>
-#include <iot_cmd.h>
-#include <sequencer1.h>
-#include <sequencer2.h>
-#include <sequencer3.h>
-#include <sequencer4.h>
+//#include <Ezo_i2c.h>
+//#include <Ezo_i2c_util.h>
+//#include <iot_cmd.h>
+//#include <sequencer1.h>
+//#include <sequencer2.h>
+//#include <sequencer3.h>
+//#include <sequencer4.h>
 
 
 //                                             Defination af diverse startbetingelser samt variabler.
@@ -139,7 +140,6 @@ bool Main = true;
 
 //Diverse I2C Adresser som ikke er defineret i deres biblioteker
 byte O2_addr = 0x6C;  //Standard ECO O2 sensor I2C address.
-byte EC_addr = 0x7F;  //Standard ECO EC I2C addresse
 
 const byte ECrxPin = 2;
 const byte ECtxPin = 4;
@@ -167,13 +167,11 @@ char inByte;
 int arrayIndex = 0;
 char dataArray[5] = { 0, 0, 0, 0, 0 };
 
-//Array til at holde på alle værdier i main-loopet
-float mainData[13] = { tidGaaet, P_ude, P_inde, RH, SCD30_temp, htu_temp, T_ude, CO2, O2, CH4, MIPEX, EC, Perc_bat };
-int mainStr;  //Variabel til bestemmelse af antal karakter i main-arrayet
+
 
 //Definering af PWM signal til servomotor
-#define MIN_PULSE_WIDTH 500       // Korteste puls
-#define MAX_PULSE_WIDTH 2500      // Længste puls
+#define MinPulseWidth 500       // Korteste puls
+#define MaxPulseWidth 2500      // Længste puls
 #define DEFAULT_PULSE_WIDTH 1500  // Standard pulsbredde når servomotoren er tilsluttet
 #define REFRESH_INTERVAL 20000    // Minmimums opdateringstid i ms
 Servo servo;
@@ -202,8 +200,8 @@ bool motorActiv = true; // bool to track if the motor is active
 bool movingBool = true; // bool to track if motor is currently doing other jobs (resetting etc.) 
 bool movingDir = false; //bool to keep track of the current direction of the motor false == vacum 
 int movingTimeAccumulating = 0; //variable to keep track of the time the motor has moved in 1 direction.  
-const int timeToMoveFull = 5000; // the time it takes for the actuator to move full stroke
-const int settlingTime = 10000;      // Settling time before switching direction (in milliseconds)
+const int timeToMoveFull = 7500; // the time it takes for the actuator to move full stroke
+const int settlingTime = 1.8e+6;      // Settling time before switching direction (in milliseconds)
 unsigned long movementTimeAccumulated = 0; // Total movement time in current direction
 unsigned long lastUpdateTime = 0; // Last time movement was updated
 unsigned long directionSwitchTime = 0; // Time when direction was switched
@@ -212,6 +210,9 @@ bool isSettling = false; // Flag to track if we are in the settling phase
 long aktuTidSidste = 0;
 const long aktuInterval = 100;
 
+//Array til at holde på alle værdier i main-loopet
+float mainData[15] = { tidGaaet, P_ude, P_inde, RH, SCD30_temp, htu_temp, T_ude, CO2, O2, CH4, MIPEX, EC, Perc_bat,movingDir};
+int mainStr;  //Variabel til bestemmelse af antal karakter i main-arrayet
 
 // Multiplexer
 PCA9540BD multiplexer;
@@ -230,7 +231,19 @@ void Send_til_platform2(float data);
 void NulstilAktu();
 void SkrivTilSD(float data);
 void delay500ms();
+int freeMemory();
+int getFreeMemory();
+void printMemoryStats();
 
+size_t freeHeap;
+void printMemoryStats() {
+    struct mallinfo mi = mallinfo();
+    Serial.print("Total Allocated Heap: ");
+    Serial.println(mi.uordblks); // Used heap
+    Serial.print("Total Free Heap: ");
+    Serial.println(mi.fordblks); // Free heap
+    freeHeap = mi.fordblks;
+}
 
 void Data_fra_platform()  //Læse-funktion
 {
@@ -366,6 +379,7 @@ void float_til_char(float* data, int size) {  //Funktion til at konvetere float 
   }
 }
 
+
 float EZO_sensorer(byte addr) {
   Wire.beginTransmission(addr);  // Kalder kredsløbet ved dets adresse.
   if (addr == O2_addr) {
@@ -374,14 +388,6 @@ float EZO_sensorer(byte addr) {
     char O2_data[20];
     tempString = String(htu_temp, 0);
     Wire.write(("RT," + tempString).c_str());  // Sender en "RT,den indvendige temperatur" kommando til sensoren for at anmode om en enkelt aflæsning.
-    Wire.endTransmission();                    // Afslutter I2C-dataoverførslen.
-  }
-  if (addr == EC_addr) {
-    dataStr = 32;
-    time_ = 700;
-    char EC_data[32];  //Bruges til at holde I2C-responskoden fra EC sensor.
-    tempString = String(T_ude, 0);
-    Wire.write(("RT," + tempString).c_str());  //Sender den temperatur kompensations kommando med den nuværende udetremperatur
     Wire.endTransmission();                    // Afslutter I2C-dataoverførslen.
   }
   delay(time_);  // Venter det korrekte tidsinterval for at kredsløbet kan fuldføre sin instruktion.
@@ -407,6 +413,7 @@ float EZO_sensorer(byte addr) {
     return ezo_data;
   }
 }
+
 float EC_float() {
   ECSerial.println("R");  // Send the "read" command to the sensor
 
@@ -431,21 +438,22 @@ float EC_float() {
 
   ec_data[i] = '\0';  // Null-terminate the string
 
-  // Parse the response to extract the numeric portion
-  String response = String(ec_data);       // Convert to String for easier manipulation
-  int commaIndex = response.indexOf(',');  // Find the first comma
+  // Directly process the data from ec_data
+  int commaIndex = -1;
+  for (int j = 0; j < i; j++) {
+    if (ec_data[j] == ',') {
+      commaIndex = j;
+      break;
+    }
+  }
+
   if (commaIndex != -1) {
-    response.setCharAt(commaIndex, '.');   // Replace comma with a period
+    ec_data[commaIndex] = '.';  // Replace comma with a period
   }
 
-  int spaceIndex = response.indexOf(' ');  // Find the space before the status message
-  if (spaceIndex != -1) {
-    response = response.substring(0, spaceIndex);  // Keep only the numeric part
-  }
-
-  // Convert to float and return
-  float ec_fdata = response.toFloat();  // Convert to float
-  if (ec_fdata == 0.0 && response[0] != '0') {
+  // Convert to float
+  float ec_fdata = atof(ec_data);  // Convert the char[] to float
+  if (ec_fdata == 0.0 && ec_data[0] != '0') {
     // Handle invalid or unexpected response
     Serial.println("Error: Invalid EC data");
     return -1.0;  // Return a sentinel value indicating an error
@@ -453,6 +461,7 @@ float EC_float() {
 
   return ec_fdata;  // Return the converted float
 }
+
 
 
 
@@ -486,7 +495,7 @@ void PdiffTjek() {
     //Serial.println("running pdifftjek");
 
     if (movingBool == true || motorActiv == false || Perc_bat< 15) {
-        Serial.println("returning due to movingBool == true");
+        //Serial.println("returning due to movingBool == true");
         return;
     }
 
@@ -607,8 +616,11 @@ void setup() {
 
   // Wait for serial connection
   Serial.begin(9600);
+  printMemoryStats();
+
   //while (!Serial) {}
     // Wait for Serial connection to establish
+  printMemoryStats();
   
   Serial.println("Serial connection established.");
 
@@ -639,7 +651,7 @@ void setup() {
   multiplexer.selectChannel(0);
   Bar30.init();
   Bar30.setModel(MS5837::MS5837_30BA);
-  Serial.println("Bar30 sensor initialized on multiplexer channel 0.");
+  Serial.println(F("Bar30 sensor initialized on multiplexer channel 0."));
 
   // SCD30 sensor
   SCD30.begin();
@@ -653,12 +665,12 @@ void setup() {
   multiplexer.selectChannel(1);
   TSYS.init();
   Bar100.init();
-  Serial.println("TSYS and Bar100 sensors initialized on multiplexer channel 1.");
+  Serial.println(F("TSYS and Bar100 sensors initialized on multiplexer channel 1."));
 
   // A/D converter
   ads.begin();
   ads.setGain(GAIN_TWOTHIRDS);
-  Serial.println("ADS A/D converter initialized with gain 2/3x.");
+  Serial.println(F("ADS A/D converter initialized with gain 2/3x."));
 
   // SD card initialization
   if (SD.begin(chipSelect)) {
@@ -668,19 +680,21 @@ void setup() {
       fileNum++;
       sprintf(tempFileName, "DATA%d.txt", fileNum);
     }
+
+    
     strcpy(fileName, tempFileName);
     File dataFile = SD.open(fileName, FILE_WRITE);
     if (dataFile) {
-      dataFile.println("Tid [s],P_out [mbar],P_in [mbar],RH [%],T_SCD [C],T_HTU21 [C],T_out [C],CO2 [ppm],O2 [ppt],CH4 [V],MIPEX ,EC [muS/cm], Batteriniveau [%]");
+      dataFile.println(F("Tid[s],P_out[mbar],P_in[mbar],RH[%],T_SCD[C],T_HTU21[C],T_out[C],CO2[ppm],O2[ppt],CH4[V],MIPEX,EC[muS/cm],Batteriniveau[%],motorDir,Total Free Heap:"));
       dataFile.flush();
       dataFile.close();
       Serial.println("SD card initialized. File " + String(fileName) + " created.");
     } else {
-      Serial.println("Error: Failed to open file on SD card.");
+      Serial.println(F("Error: Failed to open file on SD card."));
     }
     SD.end();
   } else {
-    Serial.println("Error: SD card initialization failed.");
+    Serial.println(F("Error: SD card initialization failed."));
   }
 
   // Leak sensor
@@ -688,21 +702,21 @@ void setup() {
   Serial.println("Leak sensor pin configured as input.");
 
   // Servo motor setup
-  servo.attach(servoPin, MIN_PULSE_WIDTH, MAX_PULSE_WIDTH);
+  servo.attach(servoPin, MinPulseWidth, MaxPulseWidth);
   servo.write(0);
   Serial.println("Servo motor initialized and set to closed position.");
   while (millis() - previousMillisSetup < interval1Setup) {}
 
   previousMillisSetup = millis();
   servo.write(6);
-  Serial.println("Servo motor moved to 6 degrees to minimize holding torque.");
+  Serial.println(F("Servo motor moved to 6 degrees to minimize holding torque."));
   while (millis() - previousMillisSetup < interval2Setup) {}
 
   // Actuator setup
   pinMode(motorPWMOP, OUTPUT);
   pinMode(motorPWMNED, OUTPUT);
   analogWrite(motorPWMOP, 150);
-  Serial.println("Actuator motor initialized and set to move up.");
+  Serial.println(F("Actuator motor initialized and set to move up."));
 
   delay(5000);
 
@@ -723,37 +737,40 @@ void setup() {
   Serial.println("Setup complete. System is ready.");
 }
 
-
-
-
-void loop() {
+void loop()
+{
   Serial.println("Starting loop");
 
-  for (int i = 0; i < 13; i++) {
-    mainData[i] = -1;  // Initialize all values in main data to -1
+  for (int i = 0; i < 15; i++)
+  {
+    mainData[i] = -1; // Initialize all values in main data to -1
   }
 
   TidNuAktu = millis();
-  if ((AktuSetup == true && TidNuAktu - startTid >= AktuStartTid) || (P_inde >= 20000)) {
+  if ((AktuSetup == true && TidNuAktu - startTid >= AktuStartTid) || (P_inde >= 20000))
+  {
     Serial.println("Stopping motor due to condition");
-    analogWrite(motorPWMOP, 0);  // Stop motor
+    analogWrite(motorPWMOP, 0); // Stop motor
     movingBool = false;
     AktuSetup = false;
   }
 
-  while (Main == false) {
-    //Serial.println("Entering standby loop");
-
-    leak = 0;  // Reset leak value
-    if (millis() - tidSidste >= interval) {
+  while (Main == false)
+  {
+    
+    // Serial.println("Entering standby loop");
+    delay(1); // Prevent watchdog timeout
+    leak = 0; // Reset leak value
+    if (millis() - tidSidste >= interval && !isMoving)
+    {
       tidSidste = millis();
-      Serial.println("Performing periodic tasks in standby loop");
+      Serial.println(F("Performing periodic tasks in standby loop"));
       Stopur();
 
       mainData[0] = tidGaaet;
       standby_data[0] = tidGaaet;
 
-      multiplexer.selectChannel(1);  // Selecting SD0 and SC0
+      multiplexer.selectChannel(1); // Selecting SD0 and SC0
       Bar100.read();
       P_ude = Bar100.pressure();
       standby_data[1] = P_ude;
@@ -778,38 +795,41 @@ void loop() {
       float_til_char(mainData, mainStr);
 
       SkrivTilSD(buffer);
-     
     }
 
     Data_fra_platform();
 
     TidNuLeak = millis();
     leak = digitalRead(leakPin);
-    if (leak == 1 && TidNuLeak - TidSidsteLeak >= IntervalLeak) {
+    if (leak == 1 && TidNuLeak - TidSidsteLeak >= IntervalLeak && !isMoving)
+    {
       Serial.println("Leak detected");
       Udp.beginPacket(remoteIp, remotePort);
       Udp.write("Leak");
       Udp.endPacket();
       TidSidsteLeak = TidNuLeak;
     }
-    if (millis() - aktuTidSidste >= aktuInterval) {
-    PdiffTjek();
-    aktuTidSidste = millis();
+
+    if (millis() - aktuTidSidste >= aktuInterval)
+    {
+      PdiffTjek();
+      aktuTidSidste = millis();
     }
   }
 
-  while (Main == true) {
-    //Serial.println("Entering main loop");
-
-    leak = 0;  // Reset leak value
-    if (millis() - tidSidste >= interval) {
+  while (Main == true)
+  {
+    // Serial.println("Entering main loop");
+    delay(1); // Prevent watchdog timeout
+    leak = 0; // Reset leak value
+    if (millis() - tidSidste >= interval)
+    {
       tidSidste = millis();
-      Serial.println("Performing periodic tasks in main loop");
+      Serial.println(F("Performing periodic tasks in main loop"));
 
       Stopur();
 
       multiplexer.selectChannel(0);
-
 
       Bar30.read();
       P_inde = Bar30.pressure();
@@ -830,7 +850,6 @@ void loop() {
       Serial.print("HTU temp: ");
       Serial.println(htu_temp);
 
-
       multiplexer.selectChannel(1);
       Bar100.read();
       P_ude = Bar100.pressure();
@@ -839,7 +858,8 @@ void loop() {
 
       TSYS.read();
       T_ude = TSYS.temperature();
-      if (isnan(T_ude) || T_ude < 0 || T_ude > 100) {
+      if (isnan(T_ude) || T_ude < 0 || T_ude > 100)
+      {
         T_ude = 99;
       }
       Serial.print("external temp: ");
@@ -853,6 +873,8 @@ void loop() {
       Serial.print("EC level: ");
       Serial.println(EC);
 
+      printMemoryStats();
+
 
       adc3 = ads.readADC_SingleEnded(1);
       CH4 = adc3 * 0.1875;
@@ -860,37 +882,66 @@ void loop() {
       Serial.println(CH4);
 
       Serial1.write("DATA");
-      Serial1.write('\r');
-      tidLyt = millis();
+      Serial1.write('\r'); // Request data from Serial1
+      tidLyt = millis();   // Start timeout timer
 
-      while ((millis() - tidLyt) < 100) {
-        if (Serial1.available()) {
-          inByte = Serial1.read();
+      unsigned long timeout = 100; // 100ms timeout
+      bool dataReceived = false;   // Flag to track if data was received
 
-          if (inByte != '\r') {
+      while ((millis() - tidLyt) < timeout)
+      {
+        if (Serial1.available())
+        {
+          inByte = Serial1.read(); // Read incoming byte
+          dataReceived = true;     // Mark that we got data
+
+          if (inByte != '\r')
+          {
             dataArray[arrayIndex] = inByte;
             arrayIndex++;
-          } else {
-            dataArray[arrayIndex] = '\0';
+          }
+          else
+          {
+            dataArray[arrayIndex] = '\0'; // Null-terminate string
             arrayIndex = 0;
           }
 
-          if (arrayIndex == 5) {
-            dataArray[5] = '\0';
-
+          // If we have enough characters (5), process MIPEX data
+          if (arrayIndex == 5)
+          {
+            dataArray[5] = '\0'; // Null-terminate string
             String MIPEX_S = String((char *)dataArray);
             int MIPEX_int = MIPEX_S.toInt();
-
             MIPEX = (float)MIPEX_int;
           }
         }
       }
 
+      // Check if no data was received within the timeout
+      if (!dataReceived)
+      {
+        Serial.println(F("Warning: No response from Serial1 within timeout!"));
+      }
+
       batteriniveau();
-      Serial.print("bat:");
+      Serial.print(F("bat:"));
       Serial.println(Perc_bat);
 
-      float mainData[13] = {tidGaaet, P_ude, P_inde, RH, SCD30_temp, htu_temp, T_ude, CO2, O2, CH4, MIPEX, EC, Perc_bat};
+      mainData[0] = tidGaaet;
+      mainData[1] = P_ude;
+      mainData[2] = P_inde;
+      mainData[3] = RH;
+      mainData[4] = SCD30_temp;
+      mainData[5] = htu_temp;
+      mainData[6] = T_ude;
+      mainData[7] = CO2;
+      mainData[8] = O2;
+      mainData[9] = CH4;
+      mainData[10] = MIPEX;
+      mainData[11] = EC;
+      mainData[12] = Perc_bat;
+      mainData[13] = movingDir;
+      mainData[14] = freeHeap;
 
       mainStr = sizeof(mainData) / sizeof(mainData[0]);
       float_til_char(mainData, mainStr);
@@ -903,16 +954,18 @@ void loop() {
 
     TidNuLeak = millis();
     leak = digitalRead(leakPin);
-    if (leak == 1 && TidNuLeak - TidSidsteLeak >= IntervalLeak) {
+    if (leak == 1 && TidNuLeak - TidSidsteLeak >= IntervalLeak)
+    {
       Serial.println("Leak detected in main loop");
       Udp.beginPacket(remoteIp, remotePort);
       Udp.write("Leak");
       Udp.endPacket();
       TidSidsteLeak = TidNuLeak;
     }
-    if (millis() - aktuTidSidste >= aktuInterval) {
-    PdiffTjek();
-    aktuTidSidste = millis();
+    if (millis() - aktuTidSidste >= aktuInterval)
+    {
+      PdiffTjek();
+      aktuTidSidste = millis();
     }
   }
 }
