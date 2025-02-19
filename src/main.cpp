@@ -23,6 +23,7 @@
 #include <avr/dtostrf.h>
 #include <PCA9540BD.h>  //Inkluderer bibliotek for PCA9540BD
 #include <malloc.h>
+#include "ADS1X15.h"
 
 
 //EZO biblioteker
@@ -94,9 +95,10 @@ float P_ude_tjek;
 float Pdiff = 35;     //Tilladelige tryk differens i mbar.
 float adjP = 0;        //Variabel til justering af tryksensorer.
                        //AD konverter
-Adafruit_ADS1115 ads;  // Initialiserer ADS1115 objektet
+//Adafruit_ADS1115 ads;  // Initialiserer ADS1115 objektet
 float CH4;             //Variabel til at holde på den beregne CH4 spænding
 int16_t adc3;          // CH4 sensoren er forbundet til ADC analog port 3
+ADS1115 ADS(0x48);
 
 //HTU-21 fugtsensor
 Adafruit_HTU21DF htu = Adafruit_HTU21DF();
@@ -196,7 +198,7 @@ unsigned long TidNuAktu;                   //Nuværende tid til aktuator stop
 const unsigned long AktuStartTid = 10000;  //Tid som aktuatoren kører for at opnå være i top.
 bool AktuSetup = true;
 unsigned long NulstilStart;  //Bruges til at nulstille aktuatorens position
-bool motorActiv = true; // bool to track if the motor is active 
+bool motorActiv = false; // bool to track if the motor is active 
 bool movingBool = true; // bool to track if motor is currently doing other jobs (resetting etc.) 
 bool movingDir = false; //bool to keep track of the current direction of the motor false == vacum 
 int movingTimeAccumulating = 0; //variable to keep track of the time the motor has moved in 1 direction.  
@@ -381,64 +383,74 @@ void float_til_char(float* data, int size) {  //Funktion til at konvetere float 
 
 
 float EZO_sensorer(byte addr) {
-  Wire.beginTransmission(addr);  // Kalder kredsløbet ved dets adresse.
+  Wire.beginTransmission(addr);  // Call the circuit by its address.
   if (addr == O2_addr) {
     dataStr = 20;
     time_ = 600;
     char O2_data[20];
     tempString = String(htu_temp, 0);
-    Wire.write(("RT," + tempString).c_str());  // Sender en "RT,den indvendige temperatur" kommando til sensoren for at anmode om en enkelt aflæsning.
-    Wire.endTransmission();                    // Afslutter I2C-dataoverførslen.
+    Wire.write(("RT," + tempString).c_str());  // Send "RT,internal temperature" command to sensor for a single reading.
+    
+    // Check if transmission was successful
+    uint8_t error = Wire.endTransmission();
+    if (error != 0) {
+      Serial.print("I2C transmission error: ");
+      Serial.println(error);
+      return -1.0; // Return an error value
+    }
   }
-  delay(time_);  // Venter det korrekte tidsinterval for at kredsløbet kan fuldføre sin instruktion.
+  delay(time_);  // Wait for the circuit to complete its instruction.
 
-  Wire.requestFrom(addr, dataStr, 1);  // Anmoder om datastørrelse byte fra kredsløbet ved den relevante addresse
-  Wire.read();
+  Wire.requestFrom(addr, dataStr, 1);  // Request data size bytes from the circuit at the relevant address
+  if (Wire.available() < 1) {
+    Serial.println("No data available from sensor");
+    return -1.0;  // Return an error value if no data is available
+  }
+
+  // Read data
   i = 0;
   while (Wire.available()) {
     in_char = Wire.read();
-    data[i] = in_char;
-    i += 1;                       // Forøger tælleren for arrayelementet.
-    if (Wire.available() == 0) {  //Tjekker om I2C-bufferen er tom. Hvis den er tom, nulstilles indekset.
-      i = 0;
-      break;
+    if (i < sizeof(data) - 1) {
+      data[i++] = in_char;
     }
-    // }
-    while (Wire.available() && i < sizeof(data) - 1) {
-      data[i] = Wire.read();
-      i++;
-    }
-    data[i] = '\0';         // Null-terminate the string
-    ezo_data = atof(data);  // Konverterer dataet til float-format
-    return ezo_data;
+    if (in_char == '\0' || i >= sizeof(data) - 1) break;  // Null-terminate or prevent buffer overflow
   }
+  data[i] = '\0';
+
+  ezo_data = atof(data);  // Convert the data to float format
+  return ezo_data;
 }
 
 float EC_float() {
   ECSerial.println("R");  // Send the "read" command to the sensor
 
-  delay(600);  // Allow the sensor to process and respond
+  const unsigned long timeout = 1000;  // 1-second timeout
+  unsigned long startTime = millis();
 
   // Reset the buffer and counter
   memset(ec_data, 0, sizeof(ec_data));
   i = 0;
 
-  unsigned long startTime = millis();  // Track start time for timeout
-  while (millis() - startTime < 1000) {  // 1-second timeout
+  while (millis() - startTime < timeout) {  // Timeout for reading
     if (ECSerial.available()) {
       char in_char = ECSerial.read();  // Read a byte
       if (i < sizeof(ec_data) - 1) {   // Ensure we don't overflow the buffer
         ec_data[i++] = in_char;        // Store the byte and increment the counter
       }
-      if (ECSerial.available() == 0) { // Exit when no more data is available
+      if (in_char == '\n' || in_char == '\r') { // End of line detected
+        ec_data[i] = '\0';  // Null-terminate the string
         break;
       }
     }
   }
 
-  ec_data[i] = '\0';  // Null-terminate the string
+  if (i == 0) {  // No data received within timeout
+    Serial.println("EC sensor did not respond within timeout");
+    return -1.0;  // Return an error value
+  }
 
-  // Directly process the data from ec_data
+  // Process the data from ec_data
   int commaIndex = -1;
   for (int j = 0; j < i; j++) {
     if (ec_data[j] == ',') {
@@ -611,17 +623,17 @@ void delay500ms() {                      //Sikre mere stabilt program. Ikke nød
   }
 }
 
-
-void setup() {
+void setup()
+{
 
   // Wait for serial connection
   Serial.begin(9600);
   printMemoryStats();
 
-  //while (!Serial) {}
-    // Wait for Serial connection to establish
+  // while (!Serial) {}
+  //  Wait for Serial connection to establish
   printMemoryStats();
-  
+
   Serial.println("Serial connection established.");
 
   // Set the baud rate for the SoftwareSerial object
@@ -629,7 +641,7 @@ void setup() {
 
   // Delay to ensure stability
   delay(2000);
-  Serial1.begin(57600);  // For UART communication to MIPEX
+  Serial1.begin(57600); // For UART communication to MIPEX
   Serial.println("Serial1 initialized at 57600 baud.");
 
   // Start I2C communication
@@ -668,32 +680,40 @@ void setup() {
   Serial.println(F("TSYS and Bar100 sensors initialized on multiplexer channel 1."));
 
   // A/D converter
-  ads.begin();
-  ads.setGain(GAIN_TWOTHIRDS);
+  //ads.begin();
+  //ads.setGain(GAIN_TWOTHIRDS);
+  ADS.begin();
+  ADS.setGain(0);
   Serial.println(F("ADS A/D converter initialized with gain 2/3x."));
 
   // SD card initialization
-  if (SD.begin(chipSelect)) {
+  if (SD.begin(chipSelect))
+  {
     fileNum = 1;
     char tempFileName[13] = "Data1.txt";
-    while (SD.exists(tempFileName)) {
+    while (SD.exists(tempFileName))
+    {
       fileNum++;
       sprintf(tempFileName, "DATA%d.txt", fileNum);
     }
 
-    
     strcpy(fileName, tempFileName);
     File dataFile = SD.open(fileName, FILE_WRITE);
-    if (dataFile) {
+    if (dataFile)
+    {
       dataFile.println(F("Tid[s],P_out[mbar],P_in[mbar],RH[%],T_SCD[C],T_HTU21[C],T_out[C],CO2[ppm],O2[ppt],CH4[V],MIPEX,EC[muS/cm],Batteriniveau[%],motorDir,Total Free Heap:"));
       dataFile.flush();
       dataFile.close();
       Serial.println("SD card initialized. File " + String(fileName) + " created.");
-    } else {
+    }
+    else
+    {
       Serial.println(F("Error: Failed to open file on SD card."));
     }
     SD.end();
-  } else {
+  }
+  else
+  {
     Serial.println(F("Error: SD card initialization failed."));
   }
 
@@ -705,12 +725,16 @@ void setup() {
   servo.attach(servoPin, MinPulseWidth, MaxPulseWidth);
   servo.write(0);
   Serial.println("Servo motor initialized and set to closed position.");
-  while (millis() - previousMillisSetup < interval1Setup) {}
+  while (millis() - previousMillisSetup < interval1Setup)
+  {
+  }
 
   previousMillisSetup = millis();
   servo.write(6);
   Serial.println(F("Servo motor moved to 6 degrees to minimize holding torque."));
-  while (millis() - previousMillisSetup < interval2Setup) {}
+  while (millis() - previousMillisSetup < interval2Setup)
+  {
+  }
 
   // Actuator setup
   pinMode(motorPWMOP, OUTPUT);
@@ -730,8 +754,6 @@ void setup() {
   Bar30.read();
   P_inde = Bar30.pressure();
   adjP = P_ude - P_inde;
-      
-
 
   // Initialization complete
   Serial.println("Setup complete. System is ready.");
@@ -757,7 +779,7 @@ void loop()
 
   while (Main == false)
   {
-    
+
     // Serial.println("Entering standby loop");
     delay(1); // Prevent watchdog timeout
     leak = 0; // Reset leak value
@@ -874,21 +896,20 @@ void loop()
       Serial.println(EC);
 
       printMemoryStats();
-
-
-      adc3 = ads.readADC_SingleEnded(1);
+      
+      adc3 = ADS.readADC(1);
+      //adc3 = ads.readADC_SingleEnded(1);
       CH4 = adc3 * 0.1875;
       Serial.print("CH4 level: ");
       Serial.println(CH4);
 
+      // Inside your main loop where MIPEX is read
       Serial1.write("DATA");
-      Serial1.write('\r'); // Request data from Serial1
-      tidLyt = millis();   // Start timeout timer
+      Serial1.write('\r');                         // Request data from Serial1
+      unsigned long timeoutMIPEX = millis() + 100; // 100ms timeout
+      bool dataReceived = false;                   // Flag to track if data was received
 
-      unsigned long timeout = 100; // 100ms timeout
-      bool dataReceived = false;   // Flag to track if data was received
-
-      while ((millis() - tidLyt) < timeout)
+      while (millis() < timeoutMIPEX)
       {
         if (Serial1.available())
         {
@@ -913,14 +934,15 @@ void loop()
             String MIPEX_S = String((char *)dataArray);
             int MIPEX_int = MIPEX_S.toInt();
             MIPEX = (float)MIPEX_int;
+            break; // Exit loop since we've received data
           }
         }
       }
 
-      // Check if no data was received within the timeout
       if (!dataReceived)
       {
         Serial.println(F("Warning: No response from Serial1 within timeout!"));
+        MIPEX = -1.0; // or some error value to indicate no reading
       }
 
       batteriniveau();
