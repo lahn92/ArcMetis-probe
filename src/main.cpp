@@ -90,12 +90,21 @@ float T_ude;
 // Bar100
 KellerLD Bar100;
 float P_ude;
+float P_ude_raw;
 float P_ude_tjek;
 // Trykdifferens til styring af aktuator
-float Pdiff = 35;             // Tilladelige tryk differens i mbar.
+float Pdiff = 75;             // Tilladelige tryk differens i mbar.
 float adjP = 0;               // Variabel til justering af tryksensorer.
 float Pdiff_high = Pdiff + 5; // Upper threshold
 float Pdiff_low = Pdiff - 5;  // Lower threshold
+
+const int P_ude_WINDOW_SIZE = 10;              // Number of readings to average
+float P_ude_pressureHistory[P_ude_WINDOW_SIZE] = {0}; // Array to store past readings
+int P_ude_historyIndex = 0;                   // Current index in the history array
+float P_ude_runningSum = 0.0;                 // Keep track of the sum for efficiency
+
+
+
 
 // AD konverter
 
@@ -142,7 +151,7 @@ float percentage;               // Variabel til at holde på den beregnede batte
 std::queue<float> last15Values; // Kø til at gemme de sidste 10 værdier
 
 // Boolean til main-loop
-bool Main = true;
+bool Main = false;
 
 // Diverse I2C Adresser som ikke er defineret i deres biblioteker
 byte O2_addr = 0x6C; // Standard ECO O2 sensor I2C address.
@@ -192,7 +201,6 @@ const long interval1Setup = 1000;
 const long interval2Setup = 100;
 
 // Aktuator
-float P_diff = 0;
 const int motorPWMOP = 5;                 // PWM pin for M1B
 const int motorPWMNED = 6;                // PWM pin for M2B
 unsigned long TidNuAktu;                  // Nuværende tid til aktuator stop
@@ -214,7 +222,7 @@ long aktuTidSidste = 0;
 const long aktuInterval = 100;
 
 // Array til at holde på alle værdier i main-loopet
-float mainData[15] = {tidGaaet, P_ude, P_inde, RH, SCD30_temp, htu_temp, T_ude, CO2, O2, CH4, MIPEX, EC, Perc_bat, movingDir};
+float mainData[13] = {tidGaaet, P_ude, P_inde, RH, SCD30_temp, htu_temp, T_ude, CO2, O2, CH4, MIPEX, EC, Perc_bat};
 int mainStr; // Variabel til bestemmelse af antal karakter i main-arrayet
 
 // Multiplexer
@@ -238,6 +246,7 @@ int freeMemory();
 int getFreeMemory();
 void printMemoryStats();
 void triggerReset();
+float PUdegetMovingAverage(float newReading);
 
 size_t freeHeap;
 void printMemoryStats()
@@ -390,6 +399,14 @@ void Data_fra_platform() // Læse-funktion
     if (input == "adjP")
     {
       adjP = P_ude - P_inde;
+    }
+    if (input == "motorActivate")
+    {
+      motorActiv = true;
+    }
+    if (input == "motorDeactivate")
+    {
+      motorActiv = false;
     }
   }
 }
@@ -555,15 +572,16 @@ void batteriniveau()
 
 void PdiffTjek()
 {
+  multiplexer.selectChannel(1);
+  Bar100.read();
+  P_ude_raw = Bar100.pressure();
+  P_ude = PUdegetMovingAverage(P_ude_raw);
+
   if (movingBool == true || motorActiv == false || Perc_bat < 15)
   {
     return;
   }
 
-  TidligereP_inde = P_inde;
-  multiplexer.selectChannel(1);
-  Bar100.read();
-  P_ude = Bar100.pressure();
   multiplexer.selectChannel(0);
   Bar30.read();
   P_inde = adjP + Bar30.pressure();
@@ -662,11 +680,13 @@ void NulstilAktu()
   NulstilStart = millis();
   analogWrite(motorPWMOP, 255);
 
-  if (NulstilStart - millis() > 5000)
-  {
-    analogWrite(motorPWMOP, 0);
-    return;
-  }
+  delay(5000);
+  
+  analogWrite(motorPWMOP, 0);
+  movementTimeAccumulated = 0;
+  directionSwitchTime = 0; 
+  return;
+  
 }
 
 void SkrivTilSD(const char *dataLine)
@@ -782,6 +802,23 @@ void triggerReset()
   NVIC_SystemReset(); // Perform software reset
 }
 
+float PUdegetMovingAverage(float newReading) {
+  // Subtract the oldest reading from the running sum
+  P_ude_runningSum -= P_ude_pressureHistory[P_ude_historyIndex];
+  
+  // Add the new reading to the history array
+  P_ude_pressureHistory[P_ude_historyIndex] = newReading;
+  
+  // Add the new reading to the running sum
+  P_ude_runningSum += newReading;
+  
+  // Move to the next index, wrapping around to 0 if needed
+  P_ude_historyIndex = (P_ude_historyIndex + 1) % P_ude_WINDOW_SIZE;
+  
+  // Return the moving average
+  return P_ude_runningSum / P_ude_WINDOW_SIZE;
+}
+
 void setup()
 {
   Serial.begin(9600);
@@ -822,10 +859,6 @@ void setup()
     else
     {
       Serial.println("No recovery file found, initializing variables...");
-      movingDir = false;
-      motorActiv = false;
-      movingTimeAccumulating = 0;
-      adjP = 0.0;
     }
 
     // SD card setup for data logging
@@ -864,7 +897,7 @@ void setup()
       if (!resetOccurred)
       {
         // Only write header if it’s a new file (normal boot)
-        dataFile.println(F("Tid[s],P_out[mbar],P_in[mbar],RH[%],T_SCD[C],T_HTU21[C],T_out[C],CO2[ppm],O2[ppt],CH4[V],MIPEX,EC[muS/cm],Batteriniveau[%],motorDir,Total Free Heap:"));
+        dataFile.println(F("Tid[s],P_out[mbar],P_in[mbar],RH[%],T_SCD[C],T_HTU21[C],T_out[C],CO2[ppm],O2[ppt],CH4[V],MIPEX,EC[muS/cm],Batteriniveau[%]"));
       }
       dataFile.flush();
       dataFile.close();
@@ -879,10 +912,6 @@ void setup()
   else
   {
     Serial.println("Error: SD card initialization failed during setup!");
-    movingDir = false;
-    motorActiv = false;
-    movingTimeAccumulating = 0;
-    adjP = 0.0;
   }
 
   // Start communication with sensors
@@ -933,6 +962,13 @@ void setup()
     delay(5000);
     analogWrite(motorPWMOP, 0);
     multiplexer.selectChannel(1);
+    for (size_t i = 0; i < P_ude_WINDOW_SIZE; i++)
+    {
+      Bar100.read();
+      P_ude = PUdegetMovingAverage(Bar100.pressure());
+      delay(100);
+    }
+    
     Bar100.read();
     P_ude = Bar100.pressure();
     multiplexer.selectChannel(0);
@@ -952,7 +988,7 @@ void loop()
 {
   Serial.println("Starting loop");
 
-  for (int i = 0; i < 15; i++)
+  for (int i = 0; i < 13; i++)
   {
     mainData[i] = -1; // Initialize all values in main data to -1
   }
@@ -982,8 +1018,6 @@ void loop()
       standby_data[0] = tidGaaet;
 
       multiplexer.selectChannel(1); // Selecting SD0 and SC0
-      Bar100.read();
-      P_ude = Bar100.pressure();
       if (P_ude > 150000 || isnan(P_ude))
       {
         triggerReset();
@@ -1004,13 +1038,17 @@ void loop()
 
       standby_str = sizeof(standby_data) / sizeof(standby_data[0]);
       float_til_char(standby_data, standby_str);
+      Serial.println("conversion done");
 
       Send_til_platform(buffer);
+      Serial.println("udp sent");
 
       mainStr = sizeof(mainData) / sizeof(mainData[0]);
       float_til_char(mainData, mainStr);
 
       SkrivTilSD(buffer);
+
+      Serial.println("sd card done");
     }
 
     Data_fra_platform();
@@ -1039,7 +1077,7 @@ void loop()
     // Serial.println("Entering main loop");
     delay(1); // Prevent watchdog timeout
     leak = 0; // Reset leak value
-    if (millis() - tidSidste >= interval )
+    if (millis() - tidSidste >= interval && !isMoving)
     {
       tidSidste = millis();
       Serial.println(F("Performing periodic tasks in main loop"));
@@ -1075,8 +1113,6 @@ void loop()
       Serial.println(htu_temp);
 
       multiplexer.selectChannel(1);
-      Bar100.read();
-      P_ude = Bar100.pressure();
       Serial.print("external pressure: ");
       Serial.println(P_ude);
 
@@ -1179,8 +1215,7 @@ void loop()
       mainData[10] = MIPEX;
       mainData[11] = EC;
       mainData[12] = Perc_bat;
-      mainData[13] = movingDir;
-      mainData[14] = freeHeap;
+
 
       mainStr = sizeof(mainData) / sizeof(mainData[0]);
       float_til_char(mainData, mainStr);
