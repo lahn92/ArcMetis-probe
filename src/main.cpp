@@ -26,6 +26,11 @@
 #include <ADS1X15.h>
 #include <nrfx.h>
 
+const int settlingTime = 30000;           // Settling time before switching direction (in milliseconds)
+float Pdiff = 10^9;                       // Tilladelige tryk differens i mbar.
+
+
+
 const char recoveryFileName[] = "RECOVERY.txt";
 
 // EZO biblioteker
@@ -93,7 +98,7 @@ float P_ude;
 float P_ude_raw;
 float P_ude_tjek;
 // Trykdifferens til styring af aktuator
-float Pdiff = 75;             // Tilladelige tryk differens i mbar.
+
 float adjP = 0;               // Variabel til justering af tryksensorer.
 float Pdiff_high = Pdiff + 5; // Upper threshold
 float Pdiff_low = Pdiff - 5;  // Lower threshold
@@ -212,7 +217,7 @@ bool movingBool = true;                    // bool to track if motor is currentl
 bool movingDir = false;                    // bool to keep track of the current direction of the motor false == vacum
 int movingTimeAccumulating = 0;            // variable to keep track of the time the motor has moved in 1 direction.
 const int timeToMoveFull = 7500;           // the time it takes for the actuator to move full stroke
-const int settlingTime = 1.8e+6;           // Settling time before switching direction (in milliseconds)
+
 unsigned long movementTimeAccumulated = 0; // Total movement time in current direction
 unsigned long lastUpdateTime = 0;          // Last time movement was updated
 unsigned long directionSwitchTime = 0;     // Time when direction was switched
