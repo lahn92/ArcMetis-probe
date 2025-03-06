@@ -27,7 +27,7 @@
 #include <nrfx.h>
 
 const int settlingTime = 30000;           // Settling time before switching direction (in milliseconds)
-float Pdiff = 10^9;                       // Tilladelige tryk differens i mbar.
+float Pdiff = 10000;                       // Tilladelige tryk differens i mbar.
 
 
 
@@ -1145,7 +1145,7 @@ void loop()
 
       printMemoryStats();
 
-      adc3 = ADS.readADC(1);
+      adc3 = ADS.readADC(3);
       // adc3 = ads.readADC_SingleEnded(1);
       if (ADS.getError() == ADS1X15_OK)
       {
