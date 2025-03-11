@@ -156,7 +156,7 @@ float percentage;               // Variabel til at holde på den beregnede batte
 std::queue<float> last15Values; // Kø til at gemme de sidste 10 værdier
 
 // Boolean til main-loop
-bool Main = false;
+bool Main = true;
 
 // Diverse I2C Adresser som ikke er defineret i deres biblioteker
 byte O2_addr = 0x6C; // Standard ECO O2 sensor I2C address.
@@ -731,12 +731,13 @@ void saveToRecoveryFile() {
   if (recoveryFile) {
     // Write variables in a comma-separated format
     recoveryFile.print(movingDir);         recoveryFile.print(",");
-    recoveryFile.print(motorActiv);       recoveryFile.print(",");
+    recoveryFile.print(motorActiv);        recoveryFile.print(",");
     recoveryFile.print(movingTimeAccumulating); recoveryFile.print(",");
-    recoveryFile.print(adjP, 6);          recoveryFile.print(",");
-    recoveryFile.print(tidGaaet);         // Add tidGaaet (int)
+    recoveryFile.print(adjP, 6);           recoveryFile.print(",");
+    recoveryFile.print(tidGaaet);          recoveryFile.print(",");
+    recoveryFile.print(Main);              // Save Main (bool)
 
-    recoveryFile.println();               // Newline to finish the entry
+    recoveryFile.println();  // Newline to finish the entry
 
     recoveryFile.flush();  // Ensure data is written
     recoveryFile.close();  // Close the file
@@ -766,19 +767,22 @@ void restoreFromRecoveryFile() {
     int comma2 = line.indexOf(',', comma1 + 1);
     int comma3 = line.indexOf(',', comma2 + 1);
     int comma4 = line.indexOf(',', comma3 + 1);
+    int comma5 = line.indexOf(',', comma4 + 1);
 
-    if (comma1 != -1 && comma2 != -1 && comma3 != -1 && comma4 != -1) {
+    if (comma1 != -1 && comma2 != -1 && comma3 != -1 && comma4 != -1 && comma5 != -1) {
       movingDir = line.substring(0, comma1).toInt(); // bool stored as 0 or 1
       motorActiv = line.substring(comma1 + 1, comma2).toInt(); // bool stored as 0 or 1
       movingTimeAccumulating = line.substring(comma2 + 1, comma3).toInt();
       adjP = line.substring(comma3 + 1, comma4).toFloat();
-      oldTime = line.substring(comma4 + 1).toInt(); // Restore tidGaaet
+      tidGaaet = line.substring(comma4 + 1, comma5).toInt();
+      Main = line.substring(comma5 + 1).toInt(); // Restore Main (bool stored as 0 or 1)
 
       Serial.print("Restored movingDir: "); Serial.println(movingDir);
       Serial.print("Restored motorActiv: "); Serial.println(motorActiv);
       Serial.print("Restored movingTimeAccumulating: "); Serial.println(movingTimeAccumulating);
       Serial.print("Restored adjP: "); Serial.println(adjP);
       Serial.print("Restored tidGaaet: "); Serial.println(tidGaaet);
+      Serial.print("Restored Main: "); Serial.println(Main);
     } else {
       Serial.println("Error: Invalid format in recovery file!");
     }
@@ -795,6 +799,7 @@ void restoreFromRecoveryFile() {
 
   SD.end(); // Release SD card resources
 }
+
 
 void triggerReset()
 {
