@@ -181,7 +181,7 @@ bool reset = false; // Startværdi for lækage interupt loo
 // Mipex sensor
 
 unsigned long tidLyt = 500; // Tid som der lyttes efter svar fra mipexsensoren
-float MIPEX = 0;            // Variabel til at gemme værdier fra MIPEX sensoren.
+float MIPEX = -1;            // Variabel til at gemme værdier fra MIPEX sensoren.
 char inByte;
 int arrayIndex = 0;
 char dataArray[5] = {0, 0, 0, 0, 0};
@@ -1166,48 +1166,6 @@ void loop()
       }
       //  handle error
 
-      Serial1.write("DATA");
-      Serial1.write('\r'); // Request data from Serial1
-      tidLyt = millis();   // Start timeout timer
-
-      unsigned long timeout = 100; // 100ms timeout
-      bool dataReceived = false;   // Flag to track if data was received
-
-      while ((millis() - tidLyt) < timeout)
-      {
-        if (Serial1.available())
-        {
-          inByte = Serial1.read(); // Read incoming byte
-          dataReceived = true;     // Mark that we got data
-
-          if (inByte != '\r')
-          {
-            dataArray[arrayIndex] = inByte;
-            arrayIndex++;
-          }
-          else
-          {
-            dataArray[arrayIndex] = '\0'; // Null-terminate string
-            arrayIndex = 0;
-          }
-
-          // If we have enough characters (5), process MIPEX data
-          if (arrayIndex == 5)
-          {
-            dataArray[5] = '\0'; // Null-terminate string
-            String MIPEX_S = String((char *)dataArray);
-            int MIPEX_int = MIPEX_S.toInt();
-            MIPEX = (float)MIPEX_int;
-          }
-        }
-      }
-
-      // Check if no data was received within the timeout
-      if (!dataReceived)
-      {
-        Serial.println(F("Warning: No response from Serial1 within timeout!"));
-      }
-
       batteriniveau();
       Serial.print(F("bat:"));
       Serial.println(Perc_bat);
@@ -1233,6 +1191,16 @@ void loop()
       SkrivTilSD(buffer);
       multiplexer.selectChannel(1);
     }
+
+    if (Serial.available() > 0) {
+      char receivedChar = Serial.read();
+      if (receivedChar == 'r') {
+          Serial.println(F("Forcing reset"));
+          triggerReset();
+      }
+  }
+  
+    
 
     Data_fra_platform();
 
