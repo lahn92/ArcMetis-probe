@@ -25,6 +25,7 @@
 #include <malloc.h>
 #include <ADS1X15.h>
 #include <nrfx.h>
+#include <DS3232.h>
 
 const int settlingTime = 30000;           // Settling time before switching direction (in milliseconds)
 float Pdiff = 10000;                       // Tilladelige tryk differens i mbar.
@@ -80,6 +81,9 @@ char buffer[buffer_size] = "";
 Adafruit_SCD30 SCD30;
 float CO2;
 float SCD30_temp;
+
+//RTC setup
+DS3232 rtc;
 
 // Bar30
 MS5837 Bar30;
@@ -225,6 +229,8 @@ bool isMoving = false;                     // Flag to check if the motor is curr
 bool isSettling = false;                   // Flag to track if we are in the settling phase
 long aktuTidSidste = 0;
 const long aktuInterval = 100;
+
+bool bootsucces = true;
 
 // Array til at holde på alle værdier i main-loopet
 float mainData[13] = {tidGaaet, P_ude, P_inde, RH, SCD30_temp, htu_temp, T_ude, CO2, O2, CH4, MIPEX, EC, Perc_bat};
@@ -774,14 +780,14 @@ void restoreFromRecoveryFile() {
       motorActiv = line.substring(comma1 + 1, comma2).toInt(); // bool stored as 0 or 1
       movingTimeAccumulating = line.substring(comma2 + 1, comma3).toInt();
       adjP = line.substring(comma3 + 1, comma4).toFloat();
-      tidGaaet = line.substring(comma4 + 1, comma5).toInt();
+      oldTime = line.substring(comma4 + 1, comma5).toInt();
       Main = line.substring(comma5 + 1).toInt(); // Restore Main (bool stored as 0 or 1)
 
       Serial.print("Restored movingDir: "); Serial.println(movingDir);
       Serial.print("Restored motorActiv: "); Serial.println(motorActiv);
       Serial.print("Restored movingTimeAccumulating: "); Serial.println(movingTimeAccumulating);
       Serial.print("Restored adjP: "); Serial.println(adjP);
-      Serial.print("Restored tidGaaet: "); Serial.println(tidGaaet);
+      Serial.print("Restored tidGaaet: "); Serial.println(oldTime);
       Serial.print("Restored Main: "); Serial.println(Main);
     } else {
       Serial.println("Error: Invalid format in recovery file!");
@@ -797,7 +803,7 @@ void restoreFromRecoveryFile() {
     Serial.println("No recovery file found, skipping restore.");
   }
 
-  SD.end(); // Release SD card resources
+  //SD.end(); // Release SD card resources
 }
 
 
@@ -829,6 +835,49 @@ float PUdegetMovingAverage(float newReading) {
   return P_ude_runningSum / P_ude_WINDOW_SIZE;
 }
 
+void printDate(Stream &str)
+{
+  char buffer[16];
+  sprintf(buffer, "%04d-%02d-%02d",
+        2000 + rtc.year(), rtc.month(), rtc.day());
+  str.print(buffer);
+}
+
+
+void printTime(Stream &str)
+{
+  char buffer[16];
+  sprintf(buffer, "%02d:%02d:%02d",
+        rtc.hours(), rtc.minutes(), rtc.seconds());
+  str.print(buffer);
+}
+
+void errorPulse(int shortDelayCount, int longDelayCount) {
+  // Do the long pulses first with 600 ms delay
+  for (int i = 0; i < longDelayCount; i++) {
+    analogWrite(motorPWMNED, 150);
+    analogWrite(motorPWMOP, 150);
+    delay(800);
+    analogWrite(motorPWMNED, 0);
+    analogWrite(motorPWMOP, 0);
+    delay(300); // Optional short gap between pulses
+  }
+
+  // Then the short pulses with 200 ms delay
+  for (int i = 0; i < shortDelayCount; i++) {
+    analogWrite(motorPWMNED, 150);
+    analogWrite(motorPWMOP, 150);
+    delay(200);
+    analogWrite(motorPWMNED, 0);
+    analogWrite(motorPWMOP, 0);
+    delay(300); // Optional short gap between pulses
+  }
+  if (longDelayCount != 0)
+  {
+    bootsucces = false;
+  } 
+}
+
 void setup()
 {
   Serial.begin(9600);
@@ -856,6 +905,28 @@ void setup()
   Udp.begin(localPort);
   Serial.println("UDP communication started on port " + String(localPort) + ".");
 
+  multiplexer.selectChannel(1);
+
+  if (rtc.begin() != DS3232_OK)
+   {
+     Serial.println("could not connect to RTC, check wires and multiplexer channel etc");
+     errorPulse(1,1);
+   }
+
+   Serial.println("RTC innitilized at: ");
+   Serial.print("Date:");
+   rtc.read();
+   printDate(Serial);
+   Serial.println();
+   Serial.print("Time:");
+   printTime(Serial);
+   Serial.println();
+
+
+  TSYS.init();
+  Bar100.init();
+  Serial.println(F("TSYS and Bar100 sensors initialized on multiplexer channel 1."));
+
   // Check for recovery file and handle reset logic
   bool resetOccurred = false;
   if (SD.begin(chipSelect))
@@ -864,6 +935,7 @@ void setup()
     {
       Serial.println("Recovery file detected, restoring variables...");
       restoreFromRecoveryFile(); // Restores variables and deletes RECOVERY.txt
+      errorPulse(6,0);
       resetOccurred = true;
     }
     else
@@ -873,29 +945,37 @@ void setup()
 
     // SD card setup for data logging
     fileNum = 1;
-    char tempFileName[13] = "DATA1.txt";
+    char tempFileName[13];
 
+    Serial.print("resetOccurred value before file logic: ");
+    Serial.println(resetOccurred);
+
+    
     if (resetOccurred)
     {
-      // Find the last used file to continue appending
-      while (SD.exists(tempFileName))
+      Serial.println("Reset boot: scanning files to determine latest...");
+      while (true)
       {
-        fileNum++;
         sprintf(tempFileName, "DATA%d.txt", fileNum);
+        Serial.print("Checking: "); Serial.println(tempFileName);
+        if (!SD.exists(tempFileName)) break;
+        fileNum++;
       }
-      fileNum--; // Step back to the last existing file
-      if (fileNum < 1)
-        fileNum = 1; // Ensure we don’t go below 1
+    
+      Serial.print("Last existing fileNum: "); Serial.println(fileNum - 1);
+      fileNum = max(1, fileNum - 1);
       sprintf(tempFileName, "DATA%d.txt", fileNum);
       Serial.println("Reset detected, continuing with existing file: " + String(tempFileName));
+      SD.end(); // Release SD card resources
     }
     else
     {
       // Normal boot: find the next available file
-      while (SD.exists(tempFileName))
+      while (true)
       {
-        fileNum++;
         sprintf(tempFileName, "DATA%d.txt", fileNum);
+        if (!SD.exists(tempFileName)) break;
+        fileNum++;
       }
       Serial.println("Normal boot, creating new file: " + String(tempFileName));
     }
@@ -907,6 +987,13 @@ void setup()
       if (!resetOccurred)
       {
         // Only write header if it’s a new file (normal boot)
+        dataFile.println("GlacierPro");
+        dataFile.print("Date:");
+        printDate(dataFile);
+        dataFile.println("");
+        dataFile.print("Time:(CEST)");
+        printTime(dataFile);
+        dataFile.println("");
         dataFile.println(F("Tid[s],P_out[mbar],P_in[mbar],RH[%],T_SCD[C],T_HTU21[C],T_out[C],CO2[ppm],O2[ppt],CH4[V],MIPEX,EC[muS/cm],Batteriniveau[%]"));
       }
       dataFile.flush();
@@ -916,12 +1003,14 @@ void setup()
     else
     {
       Serial.println(F("Error: Failed to open file on SD card."));
+      errorPulse(2,1);
     }
     SD.end();
   }
   else
   {
     Serial.println("Error: SD card initialization failed during setup!");
+    errorPulse(2,1);
   }
 
   // Start communication with sensors
@@ -937,14 +1026,10 @@ void setup()
   htu.begin();
   Serial.println("HTU-21 sensor initialized.");
 
-  multiplexer.selectChannel(1);
-  TSYS.init();
-  Bar100.init();
-  Serial.println(F("TSYS and Bar100 sensors initialized on multiplexer channel 1."));
-
   if (!ADS.begin() || !ADS.isConnected())
   {
     Serial.println(F("Warning: ADS1115 A/D converter not found at 0x48."));
+    errorPulse(3,1);
   }
   ADS.setGain(0);
   Serial.println(F("ADS A/D converter initialized with gain 2/3x."));
@@ -987,10 +1072,15 @@ void setup()
     adjP = P_ude - P_inde;
   }
 
+
   movingBool = false;
   AktuSetup = false;
 
   Serial.println("Setup complete. System is ready.");
+  if (bootsucces == true)
+  {
+    errorPulse(4,0);
+  }
 }
 
 
@@ -1184,6 +1274,8 @@ void loop()
       mainData[11] = EC;
       mainData[12] = Perc_bat;
 
+      Serial.print("Time:");
+      Serial.println(tidGaaet);
 
       mainStr = sizeof(mainData) / sizeof(mainData[0]);
       float_til_char(mainData, mainStr);
